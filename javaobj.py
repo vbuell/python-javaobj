@@ -26,32 +26,49 @@ else:
 
 __version__ = "$Revision: 20 $"
 
-def load(file_object):
+
+def load(file_object, *args):
     """
     Deserializes Java primitive data and objects serialized by ObjectOutputStream
     from a file-like object.
     """
     marshaller = JavaObjectUnmarshaller(file_object)
+    for t in args:
+        marshaller.add_transformer(t)
     marshaller.add_transformer(DefaultObjectTransformer())
     return marshaller.readObject()
 
+def load_all(file_object):
+    marshaller = JavaObjectUnmarshaller(file_object)
+    marshaller.add_transformer(DefaultObjectTransformer())
+    
+    res = []
+    while marshaller.data_left:
+        res.append(marshaller.readObject())
+    return res
 
-def loads(string):
+
+
+def loads(string, *args):
     """
     Deserializes Java objects and primitive data serialized by ObjectOutputStream
     from a string.
     """
     f = StringIO.StringIO(string)
     marshaller = JavaObjectUnmarshaller(f)
+    for t in args:
+        marshaller.add_transformer(t)
     marshaller.add_transformer(DefaultObjectTransformer())
     return marshaller.readObject()
 
 
-def dumps(object):
+def dumps(object, *args):
     """
     Serializes Java primitive data and objects unmarshaled by load(s) before into string.
     """
     marshaller = JavaObjectMarshaller()
+    for t in args:
+        marshaller.add_transformer(t)
     return marshaller.dump(object)
 
 
