@@ -221,9 +221,11 @@ class JavaObjectUnmarshaller(JavaObjectConstants):
             self.TC_CLASSDESC: self.do_classdesc,
             self.TC_OBJECT: self.do_object,
             self.TC_STRING: self.do_string,
+            self.TC_LONGSTRING: self.do_string_long,
             self.TC_ARRAY: self.do_array,
             self.TC_CLASS: self.do_class,
             self.TC_BLOCKDATA: self.do_blockdata,
+            self.TC_BLOCKDATALONG: self.do_blockdata_long,
             self.TC_REFERENCE: self.do_reference,
             self.TC_ENUM: self.do_enum,
             self.TC_ENDBLOCKDATA: self.do_null, # note that we are reusing of do_null
@@ -234,6 +236,7 @@ class JavaObjectUnmarshaller(JavaObjectConstants):
         self.object_stream = stream
         self._readStreamHeader()
         self.object_transformers = []
+        self.data_left = True
 
     def readObject(self):
         try:
@@ -244,8 +247,10 @@ class JavaObjectUnmarshaller(JavaObjectConstants):
             if len(the_rest):
                 log_error("Warning!!!!: Stream still has %s bytes left. Enable debug mode of logging to see the hexdump." % len(the_rest))
                 log_debug(self._create_hexdump(the_rest))
+                self.data_left = True
             else:
                 log_debug("Java Object unmarshalled succesfully!")
+                self.data_left = False
             self.object_stream.seek(position_bak)
 
             return res
@@ -275,11 +280,11 @@ class JavaObjectUnmarshaller(JavaObjectConstants):
         length = struct.calcsize(unpack)
         ba = self.object_stream.read(length)
         if len(ba) != length:
-            raise RuntimeError("Stream has been ended unexpectedly while unmarshaling.")
+            raise RuntimeError("Stream has been ended unexpectedly while unmarshaling. (%d vs %d)" % (len(ba), length))
         return struct.unpack(unpack, ba)
 
-    def _readString(self):
-        (length, ) = self._readStruct(">H")
+    def _readString(self, mod="H"):
+        (length, ) = self._readStruct(">" + mod)
         ba = self.object_stream.read(length)
         return ba
 
@@ -307,8 +312,9 @@ class JavaObjectUnmarshaller(JavaObjectConstants):
         (serialVersionUID, newHandle, classDescFlags) = self._readStruct(">LLB")
         clazz.serialVersionUID = serialVersionUID
         clazz.flags = classDescFlags
+        clazz.handle = newHandle
 
-        self._add_reference(clazz)
+        self._add_reference(clazz, ident)
 
         log_debug("Serial: 0x%X newHandle: 0x%X. classDescFlags: 0x%X" % (serialVersionUID, newHandle, classDescFlags), ident)
         (length, ) = self._readStruct(">H")
@@ -324,14 +330,14 @@ class JavaObjectUnmarshaller(JavaObjectConstants):
 
             if field_type == self.TYPE_ARRAY:
                 opcode, field_type = self._read_and_exec_opcode(ident=ident+1, expect=[self.TC_STRING, self.TC_REFERENCE])
-                assert type(field_type) is str
+                assert type(field_type) is JavaString
 #                if field_type is not None:
 #                    field_type = "array of " + field_type
 #                else:
 #                    field_type = "array of None"
             elif field_type == self.TYPE_OBJECT:
                 opcode, field_type = self._read_and_exec_opcode(ident=ident+1, expect=[self.TC_STRING, self.TC_REFERENCE])
-                assert type(field_type) is str
+                assert type(field_type) is JavaString
 
             log_debug("FieldName: 0x%X" % typecode + " " + str(field_name) + " " + str(field_type), ident)
             assert field_name is not None
@@ -361,6 +367,14 @@ class JavaObjectUnmarshaller(JavaObjectConstants):
         ba = self.object_stream.read(length)
         return ba
 
+    def do_blockdata_long(self, parent=None, ident=0):
+        # TC_BLOCKDATALONG (int)<size> (byte)[size]
+        log_debug("[blockdata]", ident)
+        (length, ) = self._readStruct(">I")
+        ba = self.object_stream.read(length)
+        return ba
+
+
     def do_class(self, parent=None, ident=0):
         # TC_CLASS classDesc newHandle
         log_debug("[class]", ident)
@@ -368,7 +382,7 @@ class JavaObjectUnmarshaller(JavaObjectConstants):
         # TODO: what to do with "(ClassDesc)prevObject". (see 3rd line for classDesc:)
         opcode, classdesc = self._read_and_exec_opcode(ident=ident+1, expect=[self.TC_CLASSDESC, self.TC_PROXYCLASSDESC, self.TC_NULL, self.TC_REFERENCE])
         log_debug("Classdesc: %s" % classdesc, ident)
-        self._add_reference(classdesc)
+        self._add_reference(classdesc, ident)
         return classdesc
 
     def do_object(self, parent=None, ident=0):
@@ -381,7 +395,7 @@ class JavaObjectUnmarshaller(JavaObjectConstants):
         opcode, classdesc = self._read_and_exec_opcode(ident=ident+1, expect=[self.TC_CLASSDESC, self.TC_PROXYCLASSDESC, self.TC_NULL, self.TC_REFERENCE])
         # self.TC_REFERENCE hasn't shown in spec, but actually is here
 
-        self._add_reference(java_object)
+        self._add_reference(java_object, ident)
 
         # classdata[]
 
@@ -430,7 +444,7 @@ class JavaObjectUnmarshaller(JavaObjectConstants):
         # Transform object
         for transformer in self.object_transformers:
             tmp_object = transformer.transform(java_object)
-            if tmp_object != java_object:
+            if tmp_object is not java_object:
                 java_object = tmp_object
                 break
 
@@ -439,18 +453,24 @@ class JavaObjectUnmarshaller(JavaObjectConstants):
 
     def do_string(self, parent=None, ident=0):
         log_debug("[string]", ident)
-        ba = self._readString()
-        self._add_reference(str(ba))
-        return str(ba)
+        ba = JavaString(self._readString())
+        self._add_reference(ba, ident)
+        return ba
+
+    def do_string_long(self, parent=None, ident=0):
+        log_debug("[long string]", ident)
+        ba = JavaString(self._readString("Q"))
+        self._add_reference(ba, ident)
+        return ba
 
     def do_array(self, parent=None, ident=0):
         # TC_ARRAY classDesc newHandle (int)<size> values[size]
         log_debug("[array]", ident)
         opcode, classdesc = self._read_and_exec_opcode(ident=ident+1, expect=[self.TC_CLASSDESC, self.TC_PROXYCLASSDESC, self.TC_NULL, self.TC_REFERENCE])
 
-        array = []
+        array = JavaArray(classdesc)
 
-        self._add_reference(array)
+        self._add_reference(array, ident)
 
         (size, ) = self._readStruct(">i")
         log_debug("size: " + str(size), ident)
@@ -482,11 +502,14 @@ class JavaObjectUnmarshaller(JavaObjectConstants):
 
     def do_enum(self, parent=None, ident=0):
         # TC_ENUM classDesc newHandle enumConstantName
-        enum = JavaObject()
+        enum = JavaEnum()
         opcode, classdesc = self._read_and_exec_opcode(ident=ident+1, expect=[self.TC_CLASSDESC, self.TC_PROXYCLASSDESC, self.TC_NULL, self.TC_REFERENCE])
-        self._add_reference(enum)
+        enum.classdesc = classdesc
+        self._add_reference(enum, ident)
         opcode, enumConstantName = self._read_and_exec_opcode(ident=ident+1, expect=[self.TC_STRING, self.TC_REFERENCE])
-        return enumConstantName
+        
+        enum.constant = enumConstantName
+        return enum
 
     def _create_hexdump(self, src, length=16):
         FILTER=''.join([(len(repr(chr(x)))==3) and chr(x) or '.' for x in range(256)])
@@ -500,6 +523,7 @@ class JavaObjectUnmarshaller(JavaObjectConstants):
 
     def _read_value(self, field_type, ident, name = ""):
         if len(field_type) > 1:
+            cls = field_type[1:]
             field_type = field_type[0]  # We don't need details for arrays and objects
 
         if field_type == self.TYPE_BOOLEAN:
@@ -518,7 +542,13 @@ class JavaObjectUnmarshaller(JavaObjectConstants):
         elif field_type == self.TYPE_DOUBLE:
             (res, ) = self._readStruct(">d")
         elif field_type == self.TYPE_OBJECT or field_type == self.TYPE_ARRAY:
-            opcode, res = self._read_and_exec_opcode(ident=ident+1)
+            try:
+                opcode, res = self._read_and_exec_opcode(ident=ident+1)
+            except RuntimeError:
+                if cls == 'java/lang/String;':
+                    res = JavaString(self._readString())
+                else:
+                    raise
         else:
             raise RuntimeError("Unknown typecode: %s" % field_type)
         log_debug("* %s %s: " % (field_type, name) + str(res), ident)
@@ -534,14 +564,15 @@ class JavaObjectUnmarshaller(JavaObjectConstants):
         else:
             raise RuntimeError("Typecode %s (%s) isn't supported." % (type_char, typecode))
 
-    def _add_reference(self, obj):
+    def _add_reference(self, obj, ident=0):
+        log_debug('## New reference handle 0x%X' % (len(self.references) + self.BASE_REFERENCE_IDX,), ident)
         self.references.append(obj)
 
     def _oops_dump_state(self):
         log_error("==Oops state dump" + "=" * (30 - 17))
         log_error("References: %s" % str(self.references))
         log_error("Stream seeking back at -16 byte (2nd line is an actual position!):")
-        self.object_stream.seek(-16, mode=1)
+        self.object_stream.seek(-16, 1)
         the_rest = self.object_stream.read()
         if len(the_rest):
             log_error("Warning!!!!: Stream still has %s bytes left." % len(the_rest))
