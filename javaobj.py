@@ -77,6 +77,7 @@ class JavaClass(object):
         self.name = None
         self.serialVersionUID = None
         self.flags = None
+        self.handle = None
         self.fields_names = []
         self.fields_types = []
         self.superclass = None
@@ -86,6 +87,16 @@ class JavaClass(object):
 
     def __repr__(self):
         return "[%s:0x%X]" % (self.name, self.serialVersionUID)
+
+    def __eq__(self, other):
+        if not isinstance(other, type(self)):
+            return False
+        return (self.name == other.name and
+                self.serialVersionUID == other.serialVersionUID and
+                self.flags == other.flags and
+                self.fields_names == other.fields_names and
+                self.fields_types == other.fields_types and
+                self.superclass == other.superclass)
 
 
 class JavaObject(object):
@@ -106,11 +117,42 @@ class JavaObject(object):
             name = self.classdesc.name
         return "<javaobj:%s>" % name
 
+    def __eq__(self, other):
+        if not isinstance(other, type(self)):
+            return False
+        res = (self.classdesc == other.classdesc and
+                self.annotations == other.annotations)
+        for name in self.classdesc.fields_names:
+            res = (res and 
+                   getattr(self, name) == getattr(other, name))
+        return res
+
     def copy(self, new_object):
         new_object.classdesc = self.classdesc
+        new_object.annotations = self.annotations
 
         for name in self.classdesc.fields_names:
             new_object.__setattr__(name, getattr(self, name))
+
+class JavaString(str):
+    def __init__(self, *args, **kwargs):
+        str.__init__(self, *args, **kwargs)
+
+    def __eq__(self, other):
+        if not isinstance(other, str):
+            return False
+        return str.__eq__(self, other)
+
+class JavaEnum(JavaObject):
+    def __init__(self, constant=None):
+        super(JavaEnum, self).__init__()
+        self.constant = constant
+
+class JavaArray(list, JavaObject):
+    def __init__(self, classdesc=None):
+        list.__init__(self)
+        JavaObject.__init__(self)
+        self.classdesc = classdesc
 
 class JavaObjectConstants:
 
