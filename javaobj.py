@@ -584,6 +584,10 @@ class JavaObjectMarshaller(JavaObjectConstants):
 
     def __init__(self, stream=None):
         self.object_stream = stream
+        self.object_transformers = []
+
+    def add_transformer(self, transformer):
+        self.object_transformers.append(transformer)
 
     def dump(self, obj):
 
@@ -597,9 +601,19 @@ class JavaObjectMarshaller(JavaObjectConstants):
         self._writeStruct(">HH", 4, (self.STREAM_MAGIC, self.STREAM_VERSION))
 
     def writeObject(self, obj):
-        log_debug("Writing object of type " + str(type(obj)))
-        if type(obj) is JavaObject:
+        log_debug("Writing object of type " + str(type(obj)) + " " + str(obj))
+        if isinstance(obj, JavaArray):
+            self.write_array(obj)
+        elif isinstance(obj, JavaEnum):
+            self.write_enum(obj)
+        elif isinstance(obj, JavaObject):
             self.write_object(obj)
+        elif isinstance(obj, JavaString):
+            self.write_string(obj)
+        elif isinstance(obj, JavaClass):
+            self.write_class(obj)
+        elif obj is None:
+            self.write_null()
         elif type(obj) is str:
             self.write_blockdata(obj)
         else:
@@ -610,67 +624,222 @@ class JavaObjectMarshaller(JavaObjectConstants):
         self.object_stream.write(ba)
 
     def _writeString(self, string):
-        len = len(string)
-        self._writeStruct(">H", 2, (len, ))
+        length = len(string)
+        self._writeStruct(">H", 2, (length, ))
         self.object_stream.write(string)
+
+    def write_string(self, obj):
+        self._writeStruct(">B", 1, (self.TC_STRING,))
+        self._writeString(obj)
+
+    def write_enum(self, obj):
+        self._writeStruct(">B", 1, (self.TC_ENUM, ))
+        self.write_classdesc(obj.get_class())
+
+        self.write_string(obj.constant)
 
     def write_blockdata(self, obj, parent=None):
         # TC_BLOCKDATA (unsigned byte)<size> (byte)[size]
-        self._writeStruct(">B", 1, (self.TC_BLOCKDATA, ))
-        if type(obj) is str:
-            self._writeStruct(">B", 1, (len(obj), ))
-            self.object_stream.write(obj)
+        length = len(obj)
+        if length <= 256:
+            self._writeStruct(">B", 1, (self.TC_BLOCKDATA, ))
+            self._writeStruct(">B", 1, (length, ))
+        else:
+            self._writeStruct(">B", 1, (self.TC_BLOCKDATALONG, ))
+            self._writeStruct(">I", 1, (length, ))
+        self.object_stream.write(obj)
+
+    def write_null(self):
+        self._writeStruct(">B", 1, (self.TC_NULL, ))
 
     def write_object(self, obj, parent=None):
+        
+        # Transform object
+        for transformer in self.object_transformers:
+            tmp_object = transformer.transform(obj)
+            if tmp_object is not obj:
+                obj = tmp_object
+                break
+
         self._writeStruct(">B", 1, (self.TC_OBJECT, ))
+        cls = obj.get_class()
+        self.write_classdesc(cls)
+
+        all_names = []
+        all_types = []
+        tmpcls = cls
+        while tmpcls:
+            all_names += tmpcls.fields_names
+            all_types += tmpcls.fields_types
+            tmpcls = tmpcls.superclass
+
+        del tmpcls
+        for name, type in zip(all_names, all_types):
+            try:
+                self._write_value(type, getattr(obj, name))
+            except AttributeError, e:
+                log_error("%s e, %s %s" % (str(e), repr(obj), repr(dir(obj))))
+                raise
+
+        del all_names, all_types
+        
+        if (cls.flags & self.SC_SERIALIZABLE and cls.flags & self.SC_WRITE_METHOD or 
+            cls.flags & self.SC_EXTERNALIZABLE and cls.flags & self.SC_BLOCK_DATA):
+            for annot in obj.annotations:
+                log_debug("Write annotation %s for %s" % (repr(annot), repr(obj),))
+                if annot == None:
+                    self.write_null()
+                else:
+                    self.writeObject(annot)
+            self._writeStruct('>B', 1, (self.TC_ENDBLOCKDATA,))
+
+    def write_class(self, obj, parent=None):
+        self._writeStruct(">B", 1, (self.TC_CLASS,))
+        self.write_classdesc(obj)
+
+    def write_classdesc(self, obj, parent=None):
         self._writeStruct(">B", 1, (self.TC_CLASSDESC, ))
+        self._writeString(obj.name)
+        self._writeStruct(">LLB", 1, (obj.serialVersionUID, obj.handle, obj.flags))
+        self._writeStruct(">H", 1, (len(obj.fields_names), ))
+        
+        for name,type in zip(obj.fields_names, obj.fields_types):
+            self._writeStruct(">B", 1, 
+                                (self._convert_type_to_char(type),))
+            self._writeString(name)
+            if type[0] in (self.TYPE_OBJECT, self.TYPE_ARRAY):
+                self.write_string(type)
+
+        self._writeStruct(">B", 1, (self.TC_ENDBLOCKDATA,))
+        if obj.superclass:
+            self.write_classdesc(obj.superclass)
+        else:
+            self.write_null()
+
+    def write_array(self, obj):
+        self._writeStruct(">B", 1, (self.TC_ARRAY,))
+        self.write_classdesc(obj.get_class())
+        self._writeStruct(">i", 1, (len(obj),))
+
+        classdesc = obj.get_class()
+
+        type_char = classdesc.name[0]
+        assert type_char == self.TYPE_ARRAY
+        type_char = classdesc.name[1]
+
+        if type_char == self.TYPE_OBJECT:
+            for o in obj:
+                self.write_object(o)
+        elif type_char == self.TYPE_ARRAY:
+            for a in obj:
+                self.write_array(a)
+        else:
+            log_debug("Write array of type %s" % type_char)
+            for v in obj:
+                self._write_value(type_char, v)
+    
+    def _write_value(self, field_type, value):
+        if len(field_type) > 1:
+            field_type = field_type[0]  # We don't need details for arrays and objects
+
+        if field_type == self.TYPE_BOOLEAN:
+            self._writeStruct(">B", 1, (1 if value else 0,))
+        elif field_type == self.TYPE_BYTE:
+            if value > 127:
+                self._writeStruct(">B", 1, (value,))
+            else:
+                self._writeStruct(">b", 1, (value,))
+        elif field_type == self.TYPE_SHORT:
+            self._writeStruct(">h", 1, (value,))
+        elif field_type == self.TYPE_INTEGER:
+            self._writeStruct(">i", 1, (value,))
+        elif field_type == self.TYPE_LONG:
+            self._writeStruct(">q", 1, (value,))
+        elif field_type == self.TYPE_FLOAT:
+            self._writeStruct(">f", 1, (value,))
+        elif field_type == self.TYPE_DOUBLE:
+            self._writeStruct(">d", 1, (value,))
+        elif field_type == self.TYPE_OBJECT or field_type == self.TYPE_ARRAY:
+            if value == None:
+                self.write_null()
+            elif isinstance(value, JavaEnum):
+                self.write_enum(value)
+            elif isinstance(value, JavaObject):
+                self.write_object(value)
+            elif isinstance(value, JavaString):
+                self.write_string(value)
+            elif isinstance(value, str):
+                self.write_blockdata(value)
+            else:
+                raise RuntimeError("Unknown typecode: %s" % field_type)
+        else:
+            raise RuntimeError("Unknown typecode: %s" % field_type)
+ 
+    def _convert_type_to_char(self, type_char):
+        typecode = type_char
+        if type(type_char) is int:
+            typecode = chr(type_char)
+
+        if typecode in self.TYPECODES_LIST:
+            return ord(typecode)
+        elif len(typecode) > 1:
+            if typecode[0] == 'L':
+                return ord(self.TYPE_OBJECT)
+            elif typecode[0] == '[':
+                return ord(self.TYPE_ARRAY)
+
+        raise RuntimeError("Typecode %s (%s) isn't supported." % (type_char, typecode))
 
 class DefaultObjectTransformer(object):
 
     class JavaList(list, JavaObject):
-        pass
+        def __init__(self, *args, **kwargs):
+            list.__init__(self, *args, **kwargs)
+            JavaObject.__init__(self)
 
     class JavaMap(dict, JavaObject):
-        pass
+        def __init__(self, *args, **kwargs):
+            dict.__init__(self, *args, **kwargs)
+            JavaObject.__init__(self)
 
     def transform(self, object):
         if object.get_class().name == "java.util.ArrayList":
             #    * @serialData The length of the array backing the <tt>ArrayList</tt>
             #    *             instance is emitted (int), followed by all of its elements
             #    *             (each an <tt>Object</tt>) in the proper order.
-            print "---"
-            print "java.util.ArrayList"
-            print object.annotations
-            print "---"
+            #print "---"
+            #print "java.util.ArrayList"
+            #print object.annotations
+            #print "---"
             new_object = self.JavaList()
             object.copy(new_object)
             new_object.extend(object.annotations[1:])
-            print ">>> object:", new_object
+            #print ">>> object:", new_object
             return new_object
         if object.get_class().name == "java.util.LinkedList":
-            print "---"
-            print
-            print "java.util.LinkedList"
-            print object.annotations
-            print "---"
+            #print "---"
+            #print
+            #print "java.util.LinkedList"
+            #print object.annotations
+            #print "---"
             new_object = self.JavaList()
             object.copy(new_object)
             new_object.extend(object.annotations[1:])
-            print ">>> object:", new_object
+            #print ">>> object:", new_object
             return new_object
         if object.get_class().name == "java.util.HashMap":
-            print "---"
-            print
-            print "java.util.HashMap"
-            print object.annotations
-            print "---"
+            #print "---"
+            #print
+            #print "java.util.HashMap"
+            #print object.annotations
+            #print "---"
             new_object = self.JavaMap()
             object.copy(new_object)
 
-            for i in range((len(object.annotations)-1)/2):
-                new_object[object.annotations[i*2+1]] = object.annotations[i*2+2]
+            for i in range(1, len(object.annotations),2):
+                new_object[object.annotations[i]] = object.annotations[i+1]
 
-            print ">>> object:", new_object
+            #print ">>> object:", new_object
             return new_object
 
         return object
