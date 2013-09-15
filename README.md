@@ -1,7 +1,7 @@
 # python-javaobj
 
 python-javaobj is a python library that provides functions for reading and writing (writing is WIP currently) Java objects
-serialized or will be deserialized by !ObjectOutputStream. This form of object
+serialized or will be deserialized by _ObjectOutputStream_. This form of object
 representation is a standard data interchange format in Java world.
 
 javaobj module exposes an API familiar to users of the standard library marshal, pickle and json modules.
@@ -11,7 +11,7 @@ javaobj module exposes an API familiar to users of the standard library marshal,
  * Java object instance unmarshaling
  * Java classes unmarshaling
  * Primitive values unmarshaling
- * Automatic conversion of Java Collections to python ones (!HashMap => dict, !ArrayList => list, etc)
+ * Automatic conversion of Java Collections to python ones (_HashMap_ => dict, _ArrayList_ => list, etc)
  
 ## Requirements
 
