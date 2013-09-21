@@ -1,5 +1,3 @@
-#   Copyright 2010-2013 Volodymyr Buell
-#
 #   Licensed under the Apache License, Version 2.0 (the "License");
 #   you may not use this file except in compliance with the License.
 #   You may obtain a copy of the License at
@@ -54,6 +52,7 @@ def load(file_object, *args):
     marshaller.add_transformer(DefaultObjectTransformer())
     return marshaller.readObject()
 
+
 def load_all(file_object):
     marshaller = JavaObjectUnmarshaller(file_object)
     marshaller.add_transformer(DefaultObjectTransformer())
@@ -62,7 +61,6 @@ def load_all(file_object):
     while marshaller.data_left:
         res.append(marshaller.readObject())
     return res
-
 
 
 def loads(string, *args):
@@ -150,6 +148,7 @@ class JavaObject(object):
         for name in self.classdesc.fields_names:
             new_object.__setattr__(name, getattr(self, name))
 
+
 class JavaString(str):
     def __init__(self, *args, **kwargs):
         str.__init__(self, *args, **kwargs)
@@ -159,16 +158,19 @@ class JavaString(str):
             return False
         return str.__eq__(self, other)
 
+
 class JavaEnum(JavaObject):
     def __init__(self, constant=None):
         super(JavaEnum, self).__init__()
         self.constant = constant
+
 
 class JavaArray(list, JavaObject):
     def __init__(self, classdesc=None):
         list.__init__(self)
         JavaObject.__init__(self)
         self.classdesc = classdesc
+
 
 class JavaObjectConstants:
 
@@ -262,7 +264,7 @@ class JavaObjectUnmarshaller(JavaObjectConstants):
             the_rest = self.object_stream.read()
             if len(the_rest):
                 log_error("Warning!!!!: Stream still has %s bytes left. Enable debug mode of logging to see the hexdump." % len(the_rest))
-                log_debug(self._create_hexdump(the_rest))
+                log_debug(self._create_hexdump(the_rest, position_bak))
                 self.data_left = True
             else:
                 log_debug("Java Object unmarshalled succesfully!")
@@ -270,7 +272,7 @@ class JavaObjectUnmarshaller(JavaObjectConstants):
             self.object_stream.seek(position_bak)
 
             return res
-        except Exception, e:
+        except Exception as e:
             self._oops_dump_state()
             raise
 
@@ -283,8 +285,9 @@ class JavaObjectUnmarshaller(JavaObjectConstants):
             raise IOError("The stream is not java serialized object. Invalid stream header: %04X%04X" % (magic, version))
 
     def _read_and_exec_opcode(self, ident=0, expect=None):
+        position = self.object_stream.tell()
         (opid, ) = self._readStruct(">B")
-        log_debug("OpCode: 0x%X" % opid, ident)
+        log_debug("OpCode: 0x%X (at offset: 0x%X)" % (opid, position), ident)
         if expect and opid not in expect:
             raise IOError("Unexpected opcode 0x%X" % opid)
         handler = self.opmap.get(opid)
@@ -389,7 +392,6 @@ class JavaObjectUnmarshaller(JavaObjectConstants):
         (length, ) = self._readStruct(">I")
         ba = self.object_stream.read(length)
         return ba
-
 
     def do_class(self, parent=None, ident=0):
         # TC_CLASS classDesc newHandle
@@ -527,14 +529,14 @@ class JavaObjectUnmarshaller(JavaObjectConstants):
         enum.constant = enumConstantName
         return enum
 
-    def _create_hexdump(self, src, length=16):
-        FILTER=''.join([(len(repr(chr(x)))==3) and chr(x) or '.' for x in range(256)])
+    def _create_hexdump(self, src, start_offset=0, length=16):
+        FILTER = ''.join([(len(repr(chr(x)))==3) and chr(x) or '.' for x in range(256)])
         result = []
         for i in xrange(0, len(src), length):
             s = src[i:i+length]
-            hexa = ' '.join(["%02X"%ord(x) for x in s])
+            hexa = ' '.join(["%02X" % ord(x) for x in s])
             printable = s.translate(FILTER)
-            result.append("%04X   %-*s  %s\n" % (i, length*3, hexa, printable))
+            result.append("%04X   %-*s  %s\n" % (i+start_offset, length*3, hexa, printable))
         return ''.join(result)
 
     def _read_value(self, field_type, ident, name = ""):
@@ -589,10 +591,10 @@ class JavaObjectUnmarshaller(JavaObjectConstants):
         log_error("References: %s" % str(self.references))
         log_error("Stream seeking back at -16 byte (2nd line is an actual position!):")
         self.object_stream.seek(-16, 1)
+        position = self.object_stream.tell()
         the_rest = self.object_stream.read()
         if len(the_rest):
-            log_error("Warning!!!!: Stream still has %s bytes left." % len(the_rest))
-            log_error(self._create_hexdump(the_rest))
+            log_error(self._create_hexdump(the_rest, position))
         log_error("=" * 30)
 
 
@@ -693,7 +695,7 @@ class JavaObjectMarshaller(JavaObjectConstants):
         for name, type in zip(all_names, all_types):
             try:
                 self._write_value(type, getattr(obj, name))
-            except AttributeError, e:
+            except AttributeError as e:
                 log_error("%s e, %s %s" % (str(e), repr(obj), repr(dir(obj))))
                 raise
 
